@@ -1,0 +1,15 @@
+SERVICE AGREEMENT
+
+This Service Agreement is between ABC Technologies and XYZ Solutions.
+
+1. Payment Terms
+The client must pay all invoices within 30 days of receiving the invoice.
+
+2. Termination
+Either party may terminate this agreement by providing 30 days written notice.
+Immediate termination is permitted if either party commits a material breach
+and fails to correct the breach within 15 days of receiving written notice.
+
+3. Confidentiality
+Both parties must keep confidential information private during the agreement
+and for two years after the agreement ends.
