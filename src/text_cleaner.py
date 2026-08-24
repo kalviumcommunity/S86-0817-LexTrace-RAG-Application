@@ -3,6 +3,7 @@ import re
 import unicodedata
 
 
+
 def clean_text(text: str) -> str:
     text = unicodedata.normalize("NFKC", text)
     text = text.replace("\r\n", "\n").replace("\r", "\n")
@@ -13,11 +14,12 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 
-if __name__ == "__main__":
+def load_clean_documents(data_folder="data/sample"):
+    """Load files and return their cleaned text with source metadata."""
 
-    data_folder = Path("data/sample")
+    documents = []
 
-    for file_path in data_folder.iterdir():
+    for file_path in Path(data_folder).iterdir():
 
         if not file_path.is_file():
             continue
@@ -30,15 +32,26 @@ if __name__ == "__main__":
 
             cleaned_text = clean_text(raw_text)
 
-            print(f"\n--- {file_path.name} ---")
-            print("Before:", len(raw_text), "characters")
-            print("After :", len(cleaned_text), "characters")
+            if not cleaned_text:
+                continue
 
-            print("\nBEFORE:")
-            print(raw_text[:200])
-
-            print("\nAFTER:")
-            print(cleaned_text[:200])
+            documents.append({
+                "source": file_path.name,
+                "text": cleaned_text
+            })
 
         except Exception as e:
             print(f"SKIP {file_path.name}: {e}")
+
+    return documents
+
+
+if __name__ == "__main__":
+
+    documents = load_clean_documents()
+
+    for document in documents:
+        print(f"\n--- {document['source']} ---")
+        print("Cleaned characters:", len(document["text"]))
+        print("Text:")
+        print(document["text"][:200])
