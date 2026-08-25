@@ -2,6 +2,7 @@ from pathlib import Path
 import re
 import unicodedata
 
+from docx import Document as DocxDocument
 
 
 def clean_text(text: str) -> str:
@@ -25,11 +26,22 @@ def load_clean_documents(data_folder="data/sample"):
             continue
 
         try:
-            raw_text = file_path.read_text(
-                encoding="utf-8",
-                errors="ignore"
-            )
 
+            if file_path.suffix.lower() == ".docx":
+                doc = DocxDocument(file_path)
+
+                raw_text = "\n".join(
+                    paragraph.text
+                    for paragraph in doc.paragraphs
+                )
+
+            else:
+                raw_text = file_path.read_text(
+                    encoding="utf-8",
+                    errors="ignore"
+                )
+
+            # Clean ALL file types
             cleaned_text = clean_text(raw_text)
 
             if not cleaned_text:
