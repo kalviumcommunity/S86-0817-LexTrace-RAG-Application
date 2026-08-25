@@ -10,10 +10,12 @@ banks==2.5.0
 bcrypt==5.0.0
 build==1.5.0
 certifi==2026.7.22
+cffi==2.1.1
 charset-normalizer==3.5.1
 chromadb==1.5.9
 click==8.4.2
 colorama==0.4.6
+cryptography==50.0.0
 dataclasses-json==0.6.7
 defusedxml==0.7.1
 Deprecated==1.3.1
@@ -25,6 +27,8 @@ filetype==1.2.0
 flatbuffers==25.12.19
 frozenlist==1.8.0
 fsspec==2026.7.0
+google-auth==2.57.0
+google-genai==2.19.0
 googleapis-common-protos==1.75.1
 greenlet==3.5.5
 griffe==2.2.0
@@ -47,10 +51,12 @@ jsonschema-specifications==2025.9.1
 kubernetes==36.0.3
 llama-index==0.14.23
 llama-index-core==0.14.23
+llama-index-embeddings-google-genai==0.5.1
 llama-index-embeddings-openai==0.6.0
 llama-index-instrumentation==0.5.0
 llama-index-llms-openai==0.7.10
 llama-index-workflows==2.23.1
+lxml==6.1.2
 markdown-it-py==4.2.0
 MarkupSafe==3.0.3
 marshmallow==3.26.2
@@ -78,7 +84,10 @@ pillow==12.3.0
 platformdirs==4.11.3
 propcache==0.5.2
 protobuf==7.35.1
+pyasn1==0.6.4
+pyasn1_modules==0.4.2
 pybase64==1.5.0
+pycparser==3.0
 pydantic==2.13.4
 pydantic-settings==2.15.0
 pydantic_core==2.46.4
@@ -86,6 +95,7 @@ Pygments==2.21.0
 PyPika==0.51.1
 pyproject_hooks==1.2.0
 python-dateutil==2.9.0.post0
+python-docx==1.2.0
 python-dotenv==1.2.3
 PyYAML==6.0.3
 referencing==0.37.0
@@ -111,6 +121,6 @@ urllib3==2.7.0
 uvicorn==0.52.3
 watchfiles==1.2.0
 websocket-client==1.9.0
-websockets==17.0.1
+websockets==16.1.1
 wrapt==2.3.0
 yarl==1.24.5
