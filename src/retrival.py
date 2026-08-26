@@ -96,4 +96,17 @@ if __name__ == "__main__":
 
         print(f"\nResult {i + 1}")
         print("Source:", results["metadatas"][0][i])
+        print("Distance:", results["distances"][0][i])
         print("Text:", text)
+
+'''
+Here, we are doing this bcz docs[0] says that first query in collections and same for metadates[0][i]
+will give us the result belonging to its i.
+i = 0
+documents[0][0] → termination clause
+metadatas[0][0] → contract.txt
+
+i = 1
+documents[0][1] → payment clause
+metadatas[0][1] → contract.txt
+'''
