@@ -55,7 +55,7 @@ def store_embeddings():
     return collection
 
 
-def retrieve(query, top_k=3):
+def retrieve(query, top_k=3, metadata_filter=None):
     """Find the most relevant chunks for a user query."""
 
     # Open the existing ChromaDB collection
@@ -72,7 +72,8 @@ def retrieve(query, top_k=3):
     # Search ChromaDB for the most similar chunks
     results = collection.query(
         query_embeddings=[query_embedding],
-        n_results=top_k
+        n_results=top_k,
+        where=metadata_filter
     )
 
     return results
