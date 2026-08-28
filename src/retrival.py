@@ -93,6 +93,48 @@ def retrieve(query, top_k=3, metadata_filter=None):
     ]
 
 
+def keyword_score(text, keywords):
+    """Count the supplied keywords that occur in a chunk."""
+    lowered_text = text.lower()
+    return sum(keyword.lower() in lowered_text for keyword in keywords)
+
+
+def hybrid_rank(vector_results, keywords, vector_weight=0.8, keyword_weight=0.2):
+    """Rerank vector results using semantic and keyword scores."""
+    ranked_results = []
+
+    for result in vector_results:
+        lexical_score = keyword_score(result["text"], keywords)
+        hybrid_score = (
+            vector_weight * result["score"]
+            + keyword_weight * lexical_score
+        )
+        ranked_results.append({
+            **result,
+            "keyword_score": lexical_score,
+            "hybrid_score": hybrid_score,
+        })
+
+    return sorted(
+        ranked_results,
+        key=lambda result: result["hybrid_score"],
+        reverse=True
+    )
+
+
+def show_results(label, results):
+    """Print retrieval results with their source and relevance details."""
+    print(f"\n--- {label} ---")
+
+    for rank, result in enumerate(results, start=1):
+        metadata = result["metadata"]
+        print(f"\nRank: {rank}")
+        print("Score:", round(result["score"], 4))
+        print("Keyword score:", result.get("keyword_score", 0))
+        print("Source:", metadata.get("source"))
+        print("Text:", result["text"][:120])
+
+
 if __name__ == "__main__":
 
     # First store our document embeddings
@@ -100,13 +142,18 @@ if __name__ == "__main__":
 
     query = "When can the agreement be terminated?"
 
-    # Compare how the retrieved context changes as top_k increases.
-    for top_k in [1, 3, 5]:
-        print(f"\n--- Top-{top_k} Retrieval Results ---")
+    unfiltered = retrieve(query, top_k=3)
+    filtered = retrieve(
+        query,
+        top_k=3,
+        metadata_filter={"source": "contract.txt"}
+    )
+    hybrid = hybrid_rank(
+        filtered,
+        keywords=["agreement", "terminated"]
+    )
 
-        for result in retrieve(query, top_k=top_k):
-            print(f"\nRank: {result['rank']}")
-            print("Score:", round(result["score"], 4))
-            print("Source:", result["metadata"])
-            print("Text:", result["text"])
+    show_results("Unfiltered retrieval", unfiltered)
+    show_results("Filtered retrieval", filtered)
+    show_results("Hybrid filtered retrieval", hybrid)
 
