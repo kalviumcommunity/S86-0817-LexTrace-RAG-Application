@@ -56,7 +56,7 @@ def store_embeddings():
 
 
 def retrieve(query, top_k=3, metadata_filter=None):
-    """Find the most relevant chunks for a user query."""
+    """Return the top-k chunks most similar to a user query."""
 
     # Open the existing ChromaDB collection
     collection = get_collection()
@@ -73,10 +73,24 @@ def retrieve(query, top_k=3, metadata_filter=None):
     results = collection.query(
         query_embeddings=[query_embedding],
         n_results=top_k,
-        where=metadata_filter
+        where=metadata_filter,
+        include=["documents", "metadatas", "distances"]
     )
 
-    return results
+    documents = results["documents"][0]
+    metadatas = results["metadatas"][0]
+    distances = results["distances"][0]
+
+    return [
+        {
+            "rank": i + 1,
+            "score": 1 - distances[i],
+            "text": documents[i],
+            "metadata": metadatas[i],
+            "distance": distances[i],
+        }
+        for i in range(len(documents))
+    ]
 
 
 if __name__ == "__main__":
@@ -84,30 +98,15 @@ if __name__ == "__main__":
     # First store our document embeddings
     store_embeddings()
 
-    # Test query
     query = "When can the agreement be terminated?"
 
-    # Retrieve the most relevant chunks
-    results = retrieve(query)
+    # Compare how the retrieved context changes as top_k increases.
+    for top_k in [1, 3, 5]:
+        print(f"\n--- Top-{top_k} Retrieval Results ---")
 
-    print("\n--- Retrieval Results ---")
+        for result in retrieve(query, top_k=top_k):
+            print(f"\nRank: {result['rank']}")
+            print("Score:", round(result["score"], 4))
+            print("Source:", result["metadata"])
+            print("Text:", result["text"])
 
-    # Display the retrieved chunks and their sources
-    for i, text in enumerate(results["documents"][0]):
-
-        print(f"\nResult {i + 1}")
-        print("Source:", results["metadatas"][0][i])
-        print("Distance:", results["distances"][0][i])
-        print("Text:", text)
-
-'''
-Here, we are doing this bcz docs[0] says that first query in collections and same for metadates[0][i]
-will give us the result belonging to its i.
-i = 0
-documents[0][0] → termination clause
-metadatas[0][0] → contract.txt
-
-i = 1
-documents[0][1] → payment clause
-metadatas[0][1] → contract.txt
-'''
