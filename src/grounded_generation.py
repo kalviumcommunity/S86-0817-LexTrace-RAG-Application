@@ -79,6 +79,45 @@ def retrieval_is_strong(chunks: List[Dict[str, Any]]) -> bool:
     return len(strong_chunks) >= MIN_SUPPORTING_CHUNKS
 
 
+def call_llm(prompt: str, system_prompt: Optional[str] = None, temperature: float = 0.2) -> str:
+    """Small wrapper for prompt-based LLM calls used in rewriting."""
+    messages = [{"role": "user", "content": prompt}]
+    if system_prompt:
+        messages.insert(0, {"role": "system", "content": system_prompt})
+
+    response = llm_client.chat.completions.create(
+        model=CHAT_MODEL,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=256,
+    )
+    return response.choices[0].message.content.strip()
+
+
+def rewrite_followup(history: List[Dict[str, str]], question: str) -> str:
+    """Rewrite a follow-up question into a standalone query using recent history."""
+    if not question or not question.strip():
+        raise ValueError("Question cannot be empty")
+
+    history_text = "\n".join(
+        f"{turn.get('role', 'user')}: {turn.get('content', '')}"
+        for turn in (history or [])
+    )
+
+    prompt = f"""
+Rewrite the user's latest question as a standalone search query.
+Use the conversation history only to resolve references.
+Do not answer the question.
+
+History:
+{history_text}
+
+Latest question:
+{question}
+"""
+    return call_llm(prompt, system_prompt="You rewrite follow-up questions into standalone retrieval queries.").strip()
+
+
 def guarded_answer(
     question: str,
     k: int = 4,
@@ -106,6 +145,33 @@ def guarded_answer(
     result = generate_grounded_answer(question, chunks, temperature=temperature)
     result["status"] = "answered"
     return result
+
+
+def conversational_answer(
+    history: List[Dict[str, str]],
+    user_question: str,
+    k: int = 4,
+    metadata_filter: Optional[Dict] = None,
+    temperature: float = 0.3,
+) -> Dict[str, Any]:
+    """Rewrite a follow-up question to a standalone query and answer with retrieval guardrails."""
+    rewritten_query = rewrite_followup(history, user_question)
+    chunks = retrieve(rewritten_query, top_k=k, metadata_filter=metadata_filter)
+
+    if not retrieval_is_strong(chunks):
+        answer = "I don't have enough reliable context to answer that."
+    else:
+        answer = generate_grounded_answer(user_question, chunks, temperature=temperature)["answer"]
+
+    history.append({"role": "user", "content": user_question})
+    history.append({"role": "assistant", "content": answer})
+
+    return {
+        "rewritten_query": rewritten_query,
+        "answer": answer,
+        "sources": [chunk.get("metadata", {}) for chunk in chunks],
+        "status": "answered" if retrieval_is_strong(chunks) else "refused_weak_context",
+    }
 
 
 def generate_grounded_answer(
