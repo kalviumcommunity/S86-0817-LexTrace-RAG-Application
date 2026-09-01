@@ -36,6 +36,11 @@ GEMINI_BASE_URL = os.getenv("GEMINI_BASE_URL")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "gemini-2.0-flash")
 
+# Guardrail thresholds for retrieval quality.
+# Start conservative and tune against real evaluation data.
+MIN_TOP_SCORE = 0.72
+MIN_SUPPORTING_CHUNKS = 1
+
 # Validate required environment variables
 if not GEMINI_API_KEY:
     raise ValueError("GEMINI_API_KEY is missing from .env")
@@ -61,6 +66,46 @@ CRITICAL RULES:
 6. If the context is incomplete or contradictory, acknowledge it.
 
 Remember: Grounded answers are better than confident hallucinations."""
+
+
+def retrieval_is_strong(chunks: List[Dict[str, Any]]) -> bool:
+    """Return True when retrieved context is strong enough for generation."""
+    if not chunks:
+        return False
+
+    strong_chunks = [
+        chunk for chunk in chunks if chunk.get("score", 0) >= MIN_TOP_SCORE
+    ]
+    return len(strong_chunks) >= MIN_SUPPORTING_CHUNKS
+
+
+def guarded_answer(
+    question: str,
+    k: int = 4,
+    metadata_filter: Optional[Dict] = None,
+    temperature: float = 0.3,
+    fallback_message: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Guardrails: refuse weak or missing context before generation."""
+    if not question or not question.strip():
+        raise ValueError("Question cannot be empty")
+
+    chunks = retrieve(question, top_k=k, metadata_filter=metadata_filter)
+
+    if not retrieval_is_strong(chunks):
+        refusal = fallback_message or "I don't have enough reliable context to answer that."
+        return {
+            "answer": refusal,
+            "question": question,
+            "sources": [],
+            "context": "",
+            "sources_count": 0,
+            "status": "refused_weak_context"
+        }
+
+    result = generate_grounded_answer(question, chunks, temperature=temperature)
+    result["status"] = "answered"
+    return result
 
 
 def generate_grounded_answer(
@@ -289,6 +334,17 @@ def answer_query(
             "sources": [],
             "sources_count": 0,
             "status": "no_context"
+        }
+
+    if not retrieval_is_strong(chunks):
+        logger.warning("Weak retrieval quality; refusing to answer without enough support")
+        return {
+            "answer": fallback_message or "I don't have enough reliable context to answer that.",
+            "question": question,
+            "sources": [],
+            "context": "",
+            "sources_count": 0,
+            "status": "refused_weak_context"
         }
     
     # Generate grounded answer
