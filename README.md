@@ -46,6 +46,7 @@ LexTrace-RAG-Application/
 │   ├── api.py
 │   ├── chunking.py
 │   ├── config.py
+│   ├── document_indexer.py
 │   ├── embeddings.py
 │   ├── evaluate_rag.py
 │   ├── evaluator.py
@@ -65,6 +66,8 @@ LexTrace-RAG-Application/
 ├── tests/
 │   ├── test_api.py
 │   └── test_evaluation.py
+├── uploads/
+│   └── (Runtime uploaded documents)
 ├── README.md
 ├── requirements.txt
 └── .gitignore
@@ -80,6 +83,7 @@ LexTrace-RAG-Application/
 - Google Gemini Embeddings & Chat Models (`gemini-embedding-001`, `gemini-3.1-flash-lite`)
 - ChromaDB (Vector Store)
 - LlamaIndex
+- python-docx & pypdf (Multi-format Document Ingestion)
 - python-dotenv & OpenAI SDK
 - pytest & httpx
 
@@ -106,9 +110,33 @@ Interactive OpenAPI Swagger UI is available at:
 
 ### 2. API Endpoints
 
+#### **`POST /documents`** — Upload & Index Document at Runtime
+
+Accepts a file (`.txt`, `.md`, `.pdf`, `.docx`, `.html`), validates it, stores it in `uploads/`, extracts text, chunks it, generates Gemini embeddings, and indexes it into ChromaDB so new content is immediately searchable.
+
+- **Request**: Multipart Form Data (`file=@your-document.md`)
+- **Supported Formats**: `.txt`, `.md`, `.pdf`, `.docx`, `.html`, `.htm`
+- **Response (`DocumentUploadResponse` — 201 Created)**:
+```json
+{
+  "status": "indexed",
+  "filename": "new-policy.md",
+  "summary": {
+    "document": "uploads/new-policy.md",
+    "chunks": 4,
+    "indexed": 4
+  }
+}
+```
+
+- **Validation Errors**:
+  - `415 Unsupported Media Type`: Non-supported file extensions.
+  - `400 Bad Request`: Empty files or missing filename.
+  - `413 Payload Too Large`: Files exceeding max size limit (25MB).
+
 #### **`POST /query`** — Submit User Question
 
-Validates request body, retrieves relevant context, executes guarded generation, and returns structured JSON with answers and citation sources.
+Validates request body, retrieves relevant context (including newly uploaded files), executes guarded generation, and returns structured JSON with answers and citation sources.
 
 - **Request Schema (`QueryRequest`)**:
 ```json
@@ -125,7 +153,7 @@ Validates request body, retrieves relevant context, executes guarded generation,
   "sources": [
     {
       "source": "contract.txt",
-      "chunk_id": "chunk_0",
+      "chunk_id": "contract_txt:chunk_0",
       "score": 0.754
     }
   ],
@@ -142,9 +170,6 @@ Validates request body, retrieves relevant context, executes guarded generation,
 }
 ```
 
-- **Validation Error (422 Unprocessable Entity)**:
-Triggered if `question` is shorter than 3 characters or longer than 1000 characters.
-
 #### **`GET /health`** — System & Vector DB Health
 
 ```bash
@@ -155,7 +180,7 @@ curl http://localhost:8000/health
 {
   "status": "healthy",
   "collection_name": "lextrace_documents",
-  "collection_count": 4,
+  "collection_count": 5,
   "chat_model": "gemini-3.1-flash-lite",
   "embedding_model": "gemini-embedding-001"
 }
@@ -163,12 +188,17 @@ curl http://localhost:8000/health
 
 ---
 
-### 3. Sample cURL Request
+### 3. Sample cURL Workflow (Upload & Query)
 
 ```bash
+# 1. Upload a new document at runtime
+curl -X POST http://localhost:8000/documents \
+  -F "file=@new-policy.md"
+
+# 2. Query the newly indexed document immediately
 curl -X POST http://localhost:8000/query \
   -H "Content-Type: application/json" \
-  -d '{"question":"When can the agreement be terminated?"}'
+  -d '{"question":"What does the new policy state regarding equipment stipends?"}'
 ```
 
 ---

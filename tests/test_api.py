@@ -1,3 +1,4 @@
+import io
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -85,3 +86,59 @@ def test_query_endpoint_value_error_handling():
         assert response.status_code == 400
         data = response.json()
         assert data["detail"] == "Invalid query syntax"
+
+
+def test_upload_unsupported_file_type():
+    file_bytes = b"echo 'binary payload'"
+    files = {"file": ("malicious_script.exe", file_bytes, "application/octet-stream")}
+    response = client.post("/documents", files=files)
+    assert response.status_code == 415
+    data = response.json()
+    assert "Unsupported file type" in data["detail"]
+
+
+def test_upload_empty_file():
+    empty_bytes = b""
+    files = {"file": ("empty_policy.txt", empty_bytes, "text/plain")}
+    response = client.post("/documents", files=files)
+    assert response.status_code == 400
+    data = response.json()
+    assert "empty" in data["detail"].lower()
+
+
+def test_upload_and_query_document_runtime():
+    """
+    Test uploading a new policy document at runtime, verifying indexing,
+    and querying the newly indexed information immediately without restart.
+    """
+    sample_policy_content = (
+        "# Remote Work and Equipment Policy\n\n"
+        "## Equipment Stipend\n"
+        "All remote employees receive a one-time home office equipment stipend of $1,500.\n\n"
+        "## Internet Reimbursement\n"
+        "Employees can expense up to $80 per month for high-speed home internet connectivity.\n"
+    )
+
+    filename = "test_remote_work_policy.md"
+    files = {"file": (filename, sample_policy_content.encode("utf-8"), "text/markdown")}
+
+    # 1. Upload the document
+    upload_res = client.post("/documents", files=files)
+    assert upload_res.status_code == 201
+    upload_data = upload_res.json()
+    assert upload_data["status"] == "indexed"
+    assert upload_data["filename"] == filename
+    assert upload_data["summary"]["chunks"] >= 1
+    assert upload_data["summary"]["indexed"] >= 1
+
+    # 2. Query the newly uploaded content at runtime
+    query_payload = {
+        "question": "What is the one-time home office equipment stipend amount for remote employees?"
+    }
+    query_res = client.post("/query", json=query_payload)
+    assert query_res.status_code == 200
+    query_data = query_res.json()
+
+    assert "$1,500" in query_data["answer"] or "1,500" in query_data["answer"] or "1500" in query_data["answer"]
+    assert query_data["status"] == "answered"
+    assert any(filename in s["source"] for s in query_data["sources"])

@@ -62,3 +62,18 @@ class HealthResponse(BaseModel):
     collection_count: int
     chat_model: str
     embedding_model: str
+
+
+class DocumentSummary(BaseModel):
+    """Summary of ingested and indexed document."""
+    document: str = Field(..., description="Stored document relative path", examples=["uploads/new-policy.md"])
+    chunks: int = Field(..., description="Total chunks created from document", examples=[12])
+    indexed: int = Field(..., description="Total chunks successfully indexed in vector store", examples=[12])
+
+
+class DocumentUploadResponse(BaseModel):
+    """Response returned upon successful document upload and runtime indexing."""
+    status: str = Field(default="indexed", examples=["indexed"])
+    filename: str = Field(..., description="Original name of uploaded file", examples=["new-policy.md"])
+    summary: DocumentSummary
+
