@@ -1,374 +1,194 @@
-"""
-RAG Pipeline: End-to-end Retrieval-Augmented Generation
-
-This module orchestrates the complete RAG flow:
-  1. Embed query → Convert user question to vector
-  2. Retrieve context → Find top-k relevant chunks
-  3. Assemble context → Format with citations
-  4. Generate answer → Use LLM to ground response
-  5. Return answer + sources
-"""
-
-import os
+import json
 import logging
-from typing import Dict, List, Any, Optional
+import os
+import re
+import sys
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set
+
+# Ensure project root is in sys.path
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from dotenv import load_dotenv
 from openai import OpenAI
-from llama_index.embeddings.google_genai import GoogleGenAIEmbedding
 
+from prompts.answer import CITATION_SYSTEM_PROMPT, render_citation_prompt
 from src.retrival import retrieve
-from prompts.answer import render_prompt
 
 load_dotenv()
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Configuration
-EMBED_MODEL = "gemini-embedding-001"
-CHAT_MODEL = os.getenv("CHAT_MODEL", "gemini-2.0-flash")
-GEMINI_BASE_URL = os.getenv("GEMINI_BASE_URL")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-# Validate required environment variables
-if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY is missing from .env")
-if not GEMINI_BASE_URL:
-    raise ValueError("GEMINI_BASE_URL is missing from .env")
-
-# Initialize LLM client
-llm_client = OpenAI(
-    base_url=GEMINI_BASE_URL,
-    api_key=GEMINI_API_KEY,
-)
-
-# Initialize embedding model
-embed_model = GoogleGenAIEmbedding(
-    model_name=EMBED_MODEL,
-    api_key=GEMINI_API_KEY,
-)
+FALLBACK_MESSAGE = "I could not find this information in the provided documents."
 
 
-def embed_query(query: str) -> List[float]:
-    """
-    Convert a user query into an embedding vector.
-    
-    Args:
-        query: The user's question string
-        
-    Returns:
-        A vector embedding of the query
-        
-    Raises:
-        ValueError: If query is empty
-    """
-    if not query or not query.strip():
-        raise ValueError("Query cannot be empty")
-    
-    logger.info(f"Embedding query: {query[:50]}...")
-    query_embedding = embed_model.get_text_embedding(query)
-    logger.info(f"Query embedded successfully (dimension: {len(query_embedding)})")
-    
-    return query_embedding
+def get_llm_client() -> OpenAI:
+    """Initialize and return OpenAI client pointing to Gemini endpoint."""
+    api_key = os.getenv("GEMINI_API_KEY")
+    base_url = os.getenv("GEMINI_BASE_URL")
+
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY is missing from .env")
+    if not base_url:
+        raise ValueError("GEMINI_BASE_URL is missing from .env")
+
+    return OpenAI(base_url=base_url, api_key=api_key)
 
 
-def retrieve_context(
-    query: str, 
-    k: int = 4, 
-    metadata_filter: Optional[Dict] = None
-) -> List[Dict[str, Any]]:
-    """
-    Retrieve the top-k most relevant chunks for a query.
-    
-    Args:
-        query: The user's question
-        k: Number of top chunks to retrieve (default 4)
-        metadata_filter: Optional ChromaDB where filter for metadata
-        
-    Returns:
-        List of retrieved chunks with scores, text, and metadata
-    """
-    if not query or not query.strip():
-        raise ValueError("Query cannot be empty")
-    
-    logger.info(f"Retrieving top-{k} chunks for query...")
-    chunks = retrieve(query, top_k=k, metadata_filter=metadata_filter)
-    logger.info(f"Retrieved {len(chunks)} chunks")
-    
-    return chunks
+def format_context(documents: List[str], metadatas: List[Dict[str, Any]]) -> str:
+    """Format retrieved document chunks with clear source headers."""
+    formatted_chunks = []
+    for doc, meta in zip(documents, metadatas):
+        source = meta.get("source", "unknown")
+        formatted_chunks.append(f"--- Document Source: {source} ---\n{doc}")
+    return "\n\n".join(formatted_chunks)
 
 
-def assemble_context(chunks: List[Dict[str, Any]]) -> str:
-    """
-    Format retrieved chunks into a single context string with citations.
-    
-    Each chunk is numbered and includes its source in the assembled context.
-    This allows the LLM to generate answers with proper attribution.
-    
-    Args:
-        chunks: List of retrieved chunks from retrieve_context()
-        
-    Returns:
-        Formatted context string ready for the LLM prompt
-    """
-    if not chunks:
-        logger.warning("No chunks provided to assemble_context")
-        return ""
-    
-    logger.info(f"Assembling context from {len(chunks)} chunks...")
-    parts = []
-    
-    for index, chunk in enumerate(chunks, start=1):
-        source = chunk["metadata"].get("source", "Unknown Source")
-        text = chunk["text"]
-        score = chunk.get("score", 0)
-        
-        # Format: [1] Source: filename.txt (confidence: 0.95)
-        # Followed by the chunk text
-        citation = f"[{index}] Source: {source} (relevance score: {score:.2f})"
-        parts.append(f"{citation}\n{text}")
-    
-    context = "\n\n".join(parts)
-    logger.info(f"Context assembled ({len(context)} characters)")
-    
-    return context
+def _parse_llm_response(raw_content: str, available_sources: Set[str]) -> Dict[str, Any]:
+    """Parse JSON response from LLM, handling markdown fences or fallback text."""
+    clean_content = raw_content.strip()
 
+    # Strip markdown code blocks if present
+    if clean_content.startswith("```"):
+        clean_content = re.sub(r"^```(?:json)?\s*", "", clean_content)
+        clean_content = re.sub(r"\s*```$", "", clean_content)
+        clean_content = clean_content.strip()
 
-def generate_answer(query: str, context: str, temperature: float = 0.3) -> str:
-    """
-    Generate a grounded answer using an LLM and retrieved context.
-    
-    The LLM is instructed to:
-    - Only use the provided context
-    - Not invent information
-    - Acknowledge if context is insufficient
-    
-    Args:
-        query: The original user question
-        context: Assembled context from retrieve + assemble steps
-        temperature: LLM sampling temperature (0.0-1.0, default 0.3 for consistency)
-        
-    Returns:
-        Generated answer string from the LLM
-        
-    Raises:
-        ValueError: If query or context is empty
-    """
-    if not query or not query.strip():
-        raise ValueError("Query cannot be empty")
-    
-    if not context or not context.strip():
-        logger.warning("Context is empty - LLM may return a fallback response")
-    
-    # Use the prompt template from prompts/answer.py
-    prompt = render_prompt(context, query)
-    
-    logger.info("Calling LLM to generate answer...")
-    
     try:
-        response = llm_client.chat.completions.create(
-            model=CHAT_MODEL,
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            temperature=temperature,
-            max_tokens=1024,
-        )
-        
-        answer = response.choices[0].message.content
-        logger.info("Answer generated successfully")
-        return answer
-        
-    except Exception as e:
-        logger.error(f"LLM call failed: {e}")
-        raise
+        parsed = json.loads(clean_content)
+        answer = parsed.get("answer", "").strip()
+        raw_citations = parsed.get("citations", [])
+
+        # Normalize citations to set of strings
+        if isinstance(raw_citations, list):
+            citations = {str(c).strip() for c in raw_citations if str(c).strip()}
+        elif isinstance(raw_citations, str):
+            citations = {raw_citations.strip()} if raw_citations.strip() else set()
+        else:
+            citations = set()
+
+        # If answer is a refusal / fallback, clear citations
+        if FALLBACK_MESSAGE.lower() in answer.lower() or "could not find" in answer.lower():
+            citations = set()
+
+        return {"answer": answer, "citations": citations}
+
+    except json.JSONDecodeError:
+        # Fallback parsing if LLM returned plain text
+        logger.warning("LLM response was not valid JSON. Using text fallback.")
+        answer = clean_content
+
+        # Extract any mentioned sources from text
+        citations = set()
+        if "could not find" not in answer.lower():
+            for src in available_sources:
+                if src.lower() in answer.lower():
+                    citations.add(src)
+            # If no explicit source mentions but valid answer, attribute to top available source
+            if not citations and available_sources:
+                citations = set(available_sources)
+
+        return {"answer": answer, "citations": citations}
 
 
-def answer_query(
-    query: str,
-    k: int = 4,
-    metadata_filter: Optional[Dict] = None,
-    temperature: float = 0.3,
-    return_chunks: bool = False
+def answer_with_citations(
+    question: str,
+    top_k: int = 3,
+    metadata_filter: Optional[Dict[str, Any]] = None,
+    client: Optional[OpenAI] = None,
+    model: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    End-to-end RAG orchestrator: query → embedding → retrieval → generation.
-    
-    This function connects all stages of the RAG pipeline:
-    1. Embeds the query to a vector
-    2. Retrieves top-k relevant chunks
-    3. Assembles chunks into formatted context
-    4. Generates answer using LLM
-    5. Returns answer with sources and optional chunk details
-    
-    Args:
-        query: The user's question
-        k: Number of retrieved chunks (default 4)
-        metadata_filter: Optional ChromaDB where filter
-        temperature: LLM temperature parameter (default 0.3)
-        return_chunks: Include full chunk details in response (default False)
-        
-    Returns:
-        Dictionary with keys:
-        - answer: Generated answer string
-        - sources: List of source metadata from retrieved chunks
-        - num_chunks: Number of chunks retrieved
-        - chunks: (optional) Full chunk details if return_chunks=True
-        
-    Raises:
-        ValueError: If query is empty
+    Execute full RAG pipeline:
+    1. Retrieve relevant chunks from ChromaDB
+    2. Construct citation-aware prompt
+    3. Generate grounded answer via LLM
+    4. Return structured response with answer and citations
     """
-    if not query or not query.strip():
-        raise ValueError("Query cannot be empty")
-    
-    logger.info("=" * 60)
-    logger.info(f"RAG Pipeline Started")
-    logger.info(f"Query: {query}")
-    logger.info("=" * 60)
-    
-    try:
-        # Stage 1: Embed the query
-        # (Note: retrieve() handles embedding internally, but we could use
-        # embed_query() if we need the vector for other purposes)
-        
-        # Stage 2: Retrieve relevant chunks
-        chunks = retrieve_context(query, k=k, metadata_filter=metadata_filter)
-        
-        # Handle case where retrieval returns no results
-        if not chunks:
-            logger.warning("No relevant chunks found for query")
-            return {
-                "answer": "I could not find relevant context for that question. Please try a more specific query.",
-                "sources": [],
-                "num_chunks": 0,
-                "chunks": [] if return_chunks else None,
-                "status": "no_results"
-            }
-        
-        # Stage 3: Assemble context from chunks
-        context = assemble_context(chunks)
-        
-        # Stage 4: Generate answer
-        answer = generate_answer(query, context, temperature=temperature)
-        
-        # Extract source metadata (for citations)
-        sources = [
-            {
-                "rank": chunk["rank"],
-                "source": chunk["metadata"].get("source", "Unknown"),
-                "relevance_score": chunk.get("score", 0),
-                "metadata": chunk["metadata"]
-            }
-            for chunk in chunks
-        ]
-        
-        result = {
-            "answer": answer,
-            "sources": sources,
-            "num_chunks": len(chunks),
-            "status": "success"
+    if client is None:
+        client = get_llm_client()
+
+    if model is None:
+        model = os.getenv("CHAT_MODEL", "gemini-3.1-flash-lite")
+
+    # 1. Retrieve relevant documents
+    retrieval_results = retrieve(
+        query=question,
+        top_k=top_k,
+        metadata_filter=metadata_filter
+    )
+
+    docs = retrieval_results.get("documents", [[]])[0]
+    metas = retrieval_results.get("metadatas", [[]])[0]
+    distances = retrieval_results.get("distances", [[]])[0] if "distances" in retrieval_results else []
+
+    retrieved_sources: Set[str] = {
+        meta.get("source", "unknown")
+        for meta in metas
+        if meta and "source" in meta
+    }
+
+    if not docs:
+        return {
+            "question": question,
+            "answer": FALLBACK_MESSAGE,
+            "citations": set(),
+            "retrieved_sources": set(),
+            "retrieved_contexts": [],
+            "distances": []
         }
-        
-        # Optionally include full chunk details
-        if return_chunks:
-            result["chunks"] = chunks
-        
-        logger.info("=" * 60)
-        logger.info(f"RAG Pipeline Completed Successfully")
-        logger.info(f"Answer length: {len(answer)} characters")
-        logger.info(f"Sources used: {len(sources)}")
-        logger.info("=" * 60)
-        
-        return result
-        
+
+    # 2. Format context with source headers
+    context_text = format_context(docs, metas)
+
+    # 3. Render prompt and call LLM
+    user_prompt = render_citation_prompt(
+        context=context_text,
+        question=question
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": CITATION_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.0
+        )
+        raw_response = response.choices[0].message.content or ""
+        parsed = _parse_llm_response(raw_response, retrieved_sources)
+
+        return {
+            "question": question,
+            "answer": parsed["answer"],
+            "citations": parsed["citations"],
+            "retrieved_sources": retrieved_sources,
+            "retrieved_contexts": docs,
+            "distances": distances,
+            "raw_response": raw_response
+        }
+
     except Exception as e:
-        logger.error(f"RAG Pipeline failed: {e}", exc_info=True)
-        raise
-
-
-def batch_answer_queries(
-    queries: List[str],
-    k: int = 4,
-    temperature: float = 0.3
-) -> List[Dict[str, Any]]:
-    """
-    Process multiple queries through the RAG pipeline.
-    
-    Useful for batch evaluation, testing, or processing multiple questions.
-    Logs progress and any failures per query.
-    
-    Args:
-        queries: List of query strings
-        k: Number of chunks per query
-        temperature: LLM temperature
-        
-    Returns:
-        List of results (one dict per query)
-    """
-    logger.info(f"Processing {len(queries)} queries in batch mode...")
-    results = []
-    
-    for i, query in enumerate(queries, start=1):
-        try:
-            logger.info(f"[{i}/{len(queries)}] Processing: {query[:50]}...")
-            result = answer_query(query, k=k, temperature=temperature)
-            results.append(result)
-        except Exception as e:
-            logger.error(f"[{i}/{len(queries)}] Failed: {e}")
-            results.append({
-                "answer": None,
-                "sources": [],
-                "status": "failed",
-                "error": str(e)
-            })
-    
-    logger.info(f"Batch processing complete: {len(results)} queries processed")
-    return results
+        logger.error(f"Error during LLM answer generation: {e}")
+        return {
+            "question": question,
+            "answer": f"Error generating answer: {e}",
+            "citations": set(),
+            "retrieved_sources": retrieved_sources,
+            "retrieved_contexts": docs,
+            "distances": distances,
+            "error": str(e)
+        }
 
 
 if __name__ == "__main__":
-    """
-    Example usage of the RAG pipeline.
-    
-    Run with:
-        python -m src.rag_pipeline
-    """
-    
-    # Example queries
-    example_queries = [
-        "What evidence is required for project submission?",
-        "What are the employment policy regulations?",
-        "How should contracts be structured?"
-    ]
-    
-    print("\n" + "=" * 80)
-    print("RAG PIPELINE EXAMPLE")
-    print("=" * 80 + "\n")
-    
-    for i, query in enumerate(example_queries, start=1):
-        print(f"\n{'='*80}")
-        print(f"Query {i}: {query}")
-        print("=" * 80)
-        
-        try:
-            result = answer_query(query, k=4, temperature=0.3)
-            
-            print(f"\n📝 ANSWER:")
-            print(result["answer"])
-            
-            print(f"\n📚 SOURCES ({result['num_chunks']} chunks):")
-            for source in result["sources"]:
-                print(f"  [{source['rank']}] {source['source']} "
-                      f"(score: {source['relevance_score']:.2f})")
-            
-        except Exception as e:
-            print(f"❌ Error processing query: {e}")
-    
-    print("\n" + "=" * 80)
-    print("Example complete!")
-    print("=" * 80 + "\n")
+    sample_q = "When can the agreement be terminated?"
+    print(f"\nTesting RAG pipeline with question: {sample_q}")
+    result = answer_with_citations(sample_q)
+    print("\nAnswer:", result["answer"])
+    print("Citations:", result["citations"])
+    print("Retrieved Sources:", result["retrieved_sources"])
