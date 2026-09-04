@@ -8,13 +8,21 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from src.config import config
+from src.document_indexer import process_uploaded_document, store_upload
 from src.rag_service import get_health_status, guarded_answer
-from src.schemas import HealthResponse, QueryRequest, QueryResponse, Source
+from src.schemas import (
+    DocumentSummary,
+    DocumentUploadResponse,
+    HealthResponse,
+    QueryRequest,
+    QueryResponse,
+    Source,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -112,6 +120,48 @@ def query_rag(request: QueryRequest):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="RAG service failed"
+        )
+
+
+@app.post(
+    "/documents",
+    response_model=DocumentUploadResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["Documents"]
+)
+async def upload_document(file: UploadFile = File(...)):
+    """
+    Upload a document, validate it, chunk it, embed it, and index it into the vector database at runtime.
+
+    - **file**: Multipart document file (.txt, .md, .pdf, .docx, .html)
+    - **Returns**: Indexing summary with chunk counts and runtime indexed status.
+    """
+    logger.info(f"Received document upload: '{file.filename}' (content_type={file.content_type})")
+
+    try:
+        path = await store_upload(file)
+        summary = process_uploaded_document(path)
+        return DocumentUploadResponse(
+            status="indexed",
+            filename=file.filename,
+            summary=summary
+        )
+
+    except HTTPException:
+        raise
+
+    except ValueError as error:
+        logger.warning(f"Validation error during document indexing: {error}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(error)
+        )
+
+    except Exception as error:
+        logger.error(f"Document indexing failed for {file.filename}: {error}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Document indexing failed: {error}"
         )
 
 
