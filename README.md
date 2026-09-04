@@ -43,7 +43,9 @@ LexTrace-RAG-Application/
 ├── prompts/
 │   └── answer.py
 ├── src/
+│   ├── api.py
 │   ├── chunking.py
+│   ├── config.py
 │   ├── embeddings.py
 │   ├── evaluate_rag.py
 │   ├── evaluator.py
@@ -52,13 +54,16 @@ LexTrace-RAG-Application/
 │   ├── prompt_template_test.py
 │   ├── prompt_test.py
 │   ├── rag_pipeline.py
+│   ├── rag_service.py
 │   ├── retrival.py
+│   ├── schemas.py
 │   ├── structured_output_test.py
 │   ├── temperature_test.py
 │   ├── test_sets.py
 │   ├── text_cleaner.py
 │   └── token_test.py
 ├── tests/
+│   ├── test_api.py
 │   └── test_evaluation.py
 ├── README.md
 ├── requirements.txt
@@ -70,11 +75,110 @@ LexTrace-RAG-Application/
 ## Tech Stack
 
 - Python
+- FastAPI & Uvicorn (Backend REST API)
+- Pydantic v2 (Request/Response Validation)
 - Google Gemini Embeddings & Chat Models (`gemini-embedding-001`, `gemini-3.1-flash-lite`)
 - ChromaDB (Vector Store)
 - LlamaIndex
 - python-dotenv & OpenAI SDK
-- pytest
+- pytest & httpx
+
+---
+
+## Backend REST API
+
+LexTrace exposes a production-ready FastAPI backend serving as the stable contract for frontends, chatbot UIs, or microservices.
+
+### 1. Starting the API Server
+
+```bash
+# Start server with auto-reload on http://localhost:8000
+python src/api.py
+
+# Or via uvicorn directly
+uvicorn src.api:app --host 0.0.0.0 --port 8000 --reload
+```
+
+Interactive OpenAPI Swagger UI is available at:
+👉 **`http://localhost:8000/docs`**
+
+---
+
+### 2. API Endpoints
+
+#### **`POST /query`** — Submit User Question
+
+Validates request body, retrieves relevant context, executes guarded generation, and returns structured JSON with answers and citation sources.
+
+- **Request Schema (`QueryRequest`)**:
+```json
+{
+  "question": "What notice period is required for standard contract termination?",
+  "top_k": 3
+}
+```
+
+- **Successful Response (`QueryResponse` — 200 OK)**:
+```json
+{
+  "answer": "Either party may terminate the agreement by providing 30 days written notice.",
+  "sources": [
+    {
+      "source": "contract.txt",
+      "chunk_id": "chunk_0",
+      "score": 0.754
+    }
+  ],
+  "status": "answered"
+}
+```
+
+- **Guardrail / Out-of-Context Response (200 OK)**:
+```json
+{
+  "answer": "I could not find this information in the provided documents.",
+  "sources": [],
+  "status": "refused"
+}
+```
+
+- **Validation Error (422 Unprocessable Entity)**:
+Triggered if `question` is shorter than 3 characters or longer than 1000 characters.
+
+#### **`GET /health`** — System & Vector DB Health
+
+```bash
+curl http://localhost:8000/health
+```
+
+```json
+{
+  "status": "healthy",
+  "collection_name": "lextrace_documents",
+  "collection_count": 4,
+  "chat_model": "gemini-3.1-flash-lite",
+  "embedding_model": "gemini-embedding-001"
+}
+```
+
+---
+
+### 3. Sample cURL Request
+
+```bash
+curl -X POST http://localhost:8000/query \
+  -H "Content-Type: application/json" \
+  -d '{"question":"When can the agreement be terminated?"}'
+```
+
+---
+
+### 4. Frontend Integration Guide
+
+A frontend (React, Vue, Next.js, Streamlit) can POST user queries to `/query`:
+- Render `answer` directly in the chat interface.
+- Display `sources` as clickable citation pills or evidence cards showing `source`, `chunk_id`, and relevance `score`.
+- Handle `status === "refused"` by displaying a friendly fallback badge.
 
 ---
 
@@ -100,65 +204,39 @@ Summary & Failure Diagnostics:
   └── Actionable Remediation Plan
 ```
 
-### 1. The Three Answer Evaluation Dimensions
+### Evaluation Dimensions
 
 | Dimension | Metric / Question | How It Is Scored |
 | :--- | :--- | :--- |
-| **Correctness** | Does the answer match the expected answer points? | Normalized semantic & keyword coverage ratio (`0.0` to `1.0`), including refusal verification for unanswerable questions. |
-| **Grounding** | Are answer claims supported strictly by retrieved context? | Context containment ratio (`0.0` to `1.0`). Penalizes hallucinations and rewards faithful refusal when context is missing. |
-| **Citation Accuracy** | Do citations point to the sources that actually support the claims? | F1 score between returned citations and expected source files (`0.0` to `1.0`), penalizing both under-citation and over-citation. |
+| **Correctness** | Does the answer match expected points? | Normalized semantic & keyword coverage ratio (`0.0` to `1.0`), including refusal verification. |
+| **Grounding** | Are claims supported strictly by context? | Context containment ratio (`0.0` to `1.0`). Penalizes hallucinations and rewards faithful refusal. |
+| **Citation Accuracy** | Do citations match expected sources? | F1 score between returned citations and expected source files (`0.0` to `1.0`). |
 
-### 2. Test Set Structure
+---
 
-Test cases define questions, expected answer points, and expected source references:
+## Running Evaluations & Tests
 
-```python
-test_set = [
-    {
-        "question": "What notice period is required for standard contract termination?",
-        "expected_points": ["30 days", "written notice"],
-        "expected_sources": {"contract.txt"}
-    },
-    {
-        "question": "What is the company policy on international travel per diem?",
-        "expected_points": ["could not find", "refuse", "no information"],
-        "expected_sources": set()  # Missing context guardrail test
-    }
-]
+Run the full automated test suite:
+```bash
+pytest tests/ -v
 ```
 
-### 3. Running Evaluations
-
-Run the evaluation on the LexTrace corpus:
-
+Run evaluation on LexTrace documents:
 ```bash
 python src/evaluate_rag.py lextrace
 ```
 
-Run the canonical concept test set:
-
+Run evaluation on canonical concept rubric:
 ```bash
 python src/evaluate_rag.py concept
 ```
-
-Run unit tests with pytest:
-
-```bash
-pytest tests/test_evaluation.py -v
-```
-
-### 4. Failure Diagnostics & Remediation
-
-When evaluation scores drop below `1.0`, the system automatically diagnoses the failure cause and prescribes remediation steps:
-
-- **If Correctness is low**: Inspect top-k retrieval count, chunk size/overlap boundaries, or query formulation in the prompt template.
-- **If Grounding is low**: Strengthen system constraints (`temperature=0.0`, strict context-only instructions, fallback phrases).
-- **If Citation Accuracy is low**: Fix document ingestion metadata (`source` field), enforce structured JSON citation output, and prune citations not present in the retrieved candidate set.
 
 ---
 
 ## Further Reading & References
 
+- [FastAPI - Request Body & Validation](https://fastapi.tiangolo.com/tutorial/body/)
+- [FastAPI - Handling Errors](https://fastapi.tiangolo.com/tutorial/handling-errors/)
 - [LangSmith - Evaluate a RAG application](https://docs.smith.langchain.com/evaluation/tutorials/rag)
 - [Pinecone - Evaluating retrieval in RAG](https://www.pinecone.io/learn/series/vector-databases-in-production-for-busy-engineers/rag-evaluation/)
-- [LlamaIndex - Evaluating RAG](https://docs.llamaindex.ai/en/stable/module_guides/evaluating/)
+- [LlamaIndex - Evaluating RAG](https://docs.llamaindex.ai/en/stable/module_guides/evaluating/)
