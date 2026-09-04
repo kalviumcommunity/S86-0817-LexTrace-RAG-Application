@@ -56,7 +56,7 @@ def store_embeddings():
 
 
 def retrieve(query, top_k=3, metadata_filter=None):
-    """Find the most relevant chunks for a user query."""
+    """Return the top-k chunks most similar to a user query."""
 
     # Open the existing ChromaDB collection
     collection = get_collection()
@@ -73,10 +73,66 @@ def retrieve(query, top_k=3, metadata_filter=None):
     results = collection.query(
         query_embeddings=[query_embedding],
         n_results=top_k,
-        where=metadata_filter
+        where=metadata_filter,
+        include=["documents", "metadatas", "distances"]
     )
 
-    return results
+    documents = results["documents"][0]
+    metadatas = results["metadatas"][0]
+    distances = results["distances"][0]
+
+    return [
+        {
+            "rank": i + 1,
+            "score": 1 - distances[i],
+            "text": documents[i],
+            "metadata": metadatas[i],
+            "distance": distances[i],
+        }
+        for i in range(len(documents))
+    ]
+
+
+def keyword_score(text, keywords):
+    """Count the supplied keywords that occur in a chunk."""
+    lowered_text = text.lower()
+    return sum(keyword.lower() in lowered_text for keyword in keywords)
+
+
+def hybrid_rank(vector_results, keywords, vector_weight=0.8, keyword_weight=0.2):
+    """Rerank vector results using semantic and keyword scores."""
+    ranked_results = []
+
+    for result in vector_results:
+        lexical_score = keyword_score(result["text"], keywords)
+        hybrid_score = (
+            vector_weight * result["score"]
+            + keyword_weight * lexical_score
+        )
+        ranked_results.append({
+            **result,
+            "keyword_score": lexical_score,
+            "hybrid_score": hybrid_score,
+        })
+
+    return sorted(
+        ranked_results,
+        key=lambda result: result["hybrid_score"],
+        reverse=True
+    )
+
+
+def show_results(label, results):
+    """Print retrieval results with their source and relevance details."""
+    print(f"\n--- {label} ---")
+
+    for rank, result in enumerate(results, start=1):
+        metadata = result["metadata"]
+        print(f"\nRank: {rank}")
+        print("Score:", round(result["score"], 4))
+        print("Keyword score:", result.get("keyword_score", 0))
+        print("Source:", metadata.get("source"))
+        print("Text:", result["text"][:120])
 
 
 if __name__ == "__main__":
@@ -84,30 +140,20 @@ if __name__ == "__main__":
     # First store our document embeddings
     store_embeddings()
 
-    # Test query
     query = "When can the agreement be terminated?"
 
-    # Retrieve the most relevant chunks
-    results = retrieve(query)
+    unfiltered = retrieve(query, top_k=3)
+    filtered = retrieve(
+        query,
+        top_k=3,
+        metadata_filter={"source": "contract.txt"}
+    )
+    hybrid = hybrid_rank(
+        filtered,
+        keywords=["agreement", "terminated"]
+    )
 
-    print("\n--- Retrieval Results ---")
+    show_results("Unfiltered retrieval", unfiltered)
+    show_results("Filtered retrieval", filtered)
+    show_results("Hybrid filtered retrieval", hybrid)
 
-    # Display the retrieved chunks and their sources
-    for i, text in enumerate(results["documents"][0]):
-
-        print(f"\nResult {i + 1}")
-        print("Source:", results["metadatas"][0][i])
-        print("Distance:", results["distances"][0][i])
-        print("Text:", text)
-
-'''
-Here, we are doing this bcz docs[0] says that first query in collections and same for metadates[0][i]
-will give us the result belonging to its i.
-i = 0
-documents[0][0] → termination clause
-metadatas[0][0] → contract.txt
-
-i = 1
-documents[0][1] → payment clause
-metadatas[0][1] → contract.txt
-'''
